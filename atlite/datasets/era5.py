@@ -57,6 +57,9 @@ features = {
     ],
     "temperature": ["temperature", "soil temperature", "dewpoint temperature"],
     "runoff": ["runoff"],
+    "wind_gust": ["wnd_gust10m"],
+    "lake_s_temperature": ["lake_s_temp"],
+    "lake_t_temperature": ["lake_t_temp"],
 }
 
 static_features = {"height"}
@@ -256,6 +259,60 @@ def get_data_height(retrieval_params):
     return ds
 
 
+def get_data_wind_gust(retrieval_params):
+    """
+    Get 10m wind gust data for given retrieval parameters.
+
+    ERA5 wind gust GRIBs contain mixed dataType ('an' + 'fc'); open_with_grib_conventions
+    is temporarily replaced with a closure that handles both slices and concatenates them
+    into a complete hourly time series.
+    """
+    import atlite.datasets.era5 as _self
+
+    _orig = open_with_grib_conventions  # capture original before swapping
+
+    def _mixed_open(grib_file, chunks=None, tmpdir=None):
+        return _open_with_mixed_grib_fallback(_orig, grib_file, chunks, tmpdir)
+
+    _self.open_with_grib_conventions = _mixed_open
+    try:
+        ds = retrieve_data(
+            variable=["10m_wind_gust_since_previous_post_processing"],
+            **retrieval_params,
+        )
+    finally:
+        _self.open_with_grib_conventions = _orig
+    ds = _rename_and_clean_coords(ds)
+    ds = ds.rename({"fg10": "wnd_gust10m"})
+    return ds
+
+
+def get_data_lake_s_temperature(retrieval_params):
+    """
+    Get lake surface (mix layer) temperature data for given retrieval parameters.
+    """
+    ds = retrieve_data(
+        variable=["lake_mix_layer_temperature"],
+        **retrieval_params,
+    )
+    ds = _rename_and_clean_coords(ds)
+    ds = ds.rename({"lmlt": "lake_s_temp"})
+    return ds
+
+
+def get_data_lake_t_temperature(retrieval_params):
+    """
+    Get lake total layer temperature data for given retrieval parameters.
+    """
+    ds = retrieve_data(
+        variable=["lake_total_layer_temperature"],
+        **retrieval_params,
+    )
+    ds = _rename_and_clean_coords(ds)
+    ds = ds.rename({"ltlt": "lake_t_temp"})
+    return ds
+
+
 def _area(coords):
     # North, West, South, East. Default: global
     x0, x1 = coords["x"].min().item(), coords["x"].max().item()
@@ -347,6 +404,57 @@ def sanitize_chunks(chunks, **dim_mapping):
         for intname, extname in dim_mapping.items()
         if intname in chunks
     }
+
+
+def _open_with_mixed_grib_fallback(original_open, grib_file, chunks=None, tmpdir=None):
+    """
+    Wrapper for open_with_grib_conventions that handles GRIB files containing mixed
+    dataType ('an' + 'fc'). ERA5 hourly GRIBs for forecast variables (e.g. wind gust)
+    split the same variable across both types: analysis hours (00/06/12/18 UTC) are
+    'an', forecast hours are 'fc'. Both slices are opened separately and concatenated
+    to give a complete hourly time series.
+
+    Parameters
+    ----------
+    original_open : callable
+        The real open_with_grib_conventions function to call first.
+    """
+    try:
+        return original_open(grib_file, chunks=chunks, tmpdir=tmpdir)
+    except Exception as e:
+        logger.warning(
+            f"open_with_grib_conventions failed ({e}), "
+            "retrying with dataType filter"
+        )
+        datasets = []
+        for data_type in ("an", "fc"):
+            try:
+                ds_type = xr.open_dataset(
+                    grib_file,
+                    engine="cfgrib",
+                    time_dims=["valid_time"],
+                    ignore_keys=["edition"],
+                    coords_as_attributes=[
+                        "surface",
+                        "depthBelowLandLayer",
+                        "entireAtmosphere",
+                        "heightAboveGround",
+                        "meanSea",
+                    ],
+                    filter_by_keys={"dataType": data_type},
+                    chunks=sanitize_chunks(chunks),
+                )
+                if ds_type.data_vars:
+                    datasets.append(ds_type)
+            except Exception:
+                pass
+        if not datasets:
+            raise RuntimeError(
+                f"Could not open {grib_file} with dataType 'an' or 'fc'"
+            )
+        if len(datasets) == 1:
+            return datasets[0]
+        return xr.concat(datasets, dim="valid_time").sortby("valid_time")
 
 
 def open_with_grib_conventions(
