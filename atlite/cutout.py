@@ -15,6 +15,7 @@ Base class for atlite.
 # https://github.com/rasterio/rasterio-wheels/issues/12
 
 import logging
+import shutil
 from pathlib import Path
 from tempfile import mktemp
 from warnings import warn
@@ -687,3 +688,36 @@ class Cutout:
     hydro = hydro
 
     line_rating = line_rating
+
+    # Cutout utility methods
+
+    def copy_v2(self):
+        """
+        Create a copy of this cutout with '_v2' appended to the filename,
+        saved in a 'custom' subfolder next to the original.
+        If the copy already exists it will be overwritten.
+
+        Returns
+        -------
+        Cutout
+            New Cutout pointing to the copied file.
+        """
+        old_path = Path(self.path)
+        new_path = old_path.parent / "custom" / (old_path.stem + "_v2.nc")
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(old_path, new_path)
+        return Cutout(path=new_path)
+
+    def open_dataset(self):
+        """
+        Open this cutout's NetCDF file as an xarray Dataset with chunks
+        aligned to the on-disk chunksize_time attribute, avoiding Dask
+        performance degradation from misaligned chunks.
+
+        Returns
+        -------
+        xr.Dataset
+        """
+        with xr.open_dataset(self.path) as ds:
+            chunksize_time = ds.attrs.get("chunksize_time", 100)
+        return xr.open_dataset(self.path, chunks={"time": chunksize_time})

@@ -262,26 +262,11 @@ def get_data_height(retrieval_params):
 def get_data_wind_gust(retrieval_params):
     """
     Get 10m wind gust data for given retrieval parameters.
-
-    ERA5 wind gust GRIBs contain mixed dataType ('an' + 'fc'); open_with_grib_conventions
-    is temporarily replaced with a closure that handles both slices and concatenates them
-    into a complete hourly time series.
     """
-    import atlite.datasets.era5 as _self
-
-    _orig = open_with_grib_conventions  # capture original before swapping
-
-    def _mixed_open(grib_file, chunks=None, tmpdir=None):
-        return _open_with_mixed_grib_fallback(_orig, grib_file, chunks, tmpdir)
-
-    _self.open_with_grib_conventions = _mixed_open
-    try:
-        ds = retrieve_data(
-            variable=["10m_wind_gust_since_previous_post_processing"],
-            **retrieval_params,
-        )
-    finally:
-        _self.open_with_grib_conventions = _orig
+    ds = retrieve_data(
+        variable=["10m_wind_gust_since_previous_post_processing"],
+        **retrieval_params,
+    )
     ds = _rename_and_clean_coords(ds)
     ds = ds.rename({"fg10": "wnd_gust10m"})
     return ds
@@ -406,56 +391,6 @@ def sanitize_chunks(chunks, **dim_mapping):
     }
 
 
-def _open_with_mixed_grib_fallback(original_open, grib_file, chunks=None, tmpdir=None):
-    """
-    Wrapper for open_with_grib_conventions that handles GRIB files containing mixed
-    dataType ('an' + 'fc'). ERA5 hourly GRIBs for forecast variables (e.g. wind gust)
-    split the same variable across both types: analysis hours (00/06/12/18 UTC) are
-    'an', forecast hours are 'fc'. Both slices are opened separately and concatenated
-    to give a complete hourly time series.
-
-    Parameters
-    ----------
-    original_open : callable
-        The real open_with_grib_conventions function to call first.
-    """
-    try:
-        return original_open(grib_file, chunks=chunks, tmpdir=tmpdir)
-    except Exception as e:
-        logger.warning(
-            f"open_with_grib_conventions failed ({e}), "
-            "retrying with dataType filter"
-        )
-        datasets = []
-        for data_type in ("an", "fc"):
-            try:
-                ds_type = xr.open_dataset(
-                    grib_file,
-                    engine="cfgrib",
-                    time_dims=["valid_time"],
-                    ignore_keys=["edition"],
-                    coords_as_attributes=[
-                        "surface",
-                        "depthBelowLandLayer",
-                        "entireAtmosphere",
-                        "heightAboveGround",
-                        "meanSea",
-                    ],
-                    filter_by_keys={"dataType": data_type},
-                    chunks=sanitize_chunks(chunks),
-                )
-                if ds_type.data_vars:
-                    datasets.append(ds_type)
-            except Exception:
-                pass
-        if not datasets:
-            raise RuntimeError(
-                f"Could not open {grib_file} with dataType 'an' or 'fc'"
-            )
-        if len(datasets) == 1:
-            return datasets[0]
-        return xr.concat(datasets, dim="valid_time").sortby("valid_time")
-
 
 def open_with_grib_conventions(
     grib_file: str | Path, chunks=None, tmpdir: str | Path | None = None
@@ -486,8 +421,7 @@ def open_with_grib_conventions(
     # Options to open different datasets into a datasets of consistent hypercubes which are compatible netCDF
     # There are options that might be relevant for e.g. for wave model data, that have been removed here
     # to keep the code cleaner and shorter
-    ds = xr.open_dataset(
-        grib_file,
+    _open_kwargs = dict(
         engine="cfgrib",
         time_dims=["valid_time"],
         ignore_keys=["edition"],
@@ -501,6 +435,37 @@ def open_with_grib_conventions(
         ],
         chunks=sanitize_chunks(chunks),
     )
+    try:
+        ds = xr.open_dataset(grib_file, **_open_kwargs)
+    except Exception as e:
+        # Some ERA5 variables (e.g. wind gust, lake temperatures) are stored with
+        # mixed dataType ('an' for analysis hours, 'fc' for forecast hours).
+        # cfgrib raises DatasetBuildError in that case; retry by filtering each type
+        # separately and concatenating.
+        logger.warning(
+            f"open_dataset failed ({e}), retrying with dataType filter"
+        )
+        datasets = []
+        for data_type in ("an", "fc"):
+            try:
+                ds_type = xr.open_dataset(
+                    grib_file,
+                    filter_by_keys={"dataType": data_type},
+                    **_open_kwargs,
+                )
+                if ds_type.data_vars:
+                    datasets.append(ds_type)
+            except Exception:
+                pass
+        if not datasets:
+            raise RuntimeError(
+                f"Could not open {grib_file} with or without dataType filter"
+            ) from e
+        ds = (
+            datasets[0]
+            if len(datasets) == 1
+            else xr.concat(datasets, dim="valid_time").sortby("valid_time")
+        )
     if tmpdir is None:
         add_finalizer(ds, grib_file)
 
