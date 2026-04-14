@@ -691,22 +691,39 @@ class Cutout:
 
     # Cutout utility methods
 
-    def copy_v2(self):
+    def copy(self, dest):
         """
-        Create a copy of this cutout with '_v2' appended to the filename,
-        saved in a 'custom' subfolder next to the original.
-        If the copy already exists it will be overwritten.
+        Copy this cutout's NetCDF file to a new location and return a Cutout
+        pointing to it.
+
+        The destination directory is created automatically if it does not exist.
+        Any existing file at ``dest`` is overwritten.
+
+        This is the standard way to create a derived cutout before adding new
+        ERA5 features with :meth:`prepare`. The typical workflow is::
+
+            cutout = atlite.Cutout(path="cutouts/europe-2013.nc")
+            derived = cutout.copy("cutouts/custom/europe-2013_fg10_lmlt.nc")
+            derived.prepare(features=["wind_gust", "lake_s_temperature"])
+
+        When called from a Snakemake rule, ``dest`` is the rule's declared
+        output path, which already encodes the feature shortcodes in its
+        filename (e.g. ``{cutout}_fg10_lmlt.nc``).
+
+        Parameters
+        ----------
+        dest : str or Path
+            Full destination path for the copied cutout, including filename.
 
         Returns
         -------
         Cutout
             New Cutout pointing to the copied file.
         """
-        old_path = Path(self.path)
-        new_path = old_path.parent / "custom" / (old_path.stem + "_v2.nc")
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(old_path, new_path)
-        return Cutout(path=new_path)
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.path, dest)
+        return Cutout(path=dest)
 
     def open_dataset(self):
         """
