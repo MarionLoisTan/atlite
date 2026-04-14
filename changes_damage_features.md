@@ -87,7 +87,7 @@ in the fork.
 
 ### Snakemake (PyPSA-Eur workflow)
 
-The rule `build_damage_cutout` in `rules/build_damage_profiles.smk` handles
+The rule `build_damage_cutout` in `rules/damage.smk` handles
 the copy-and-prepare step. Configure it via `config/damage_config.yaml`:
 
 ```yaml
